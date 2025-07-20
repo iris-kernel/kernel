@@ -1,0 +1,9 @@
+.vscode
+.vs
+
+*.bak
+*.o
+*.elf
+*.bin
+*.img
+*.iso
