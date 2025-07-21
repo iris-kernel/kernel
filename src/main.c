@@ -1,6 +1,7 @@
 #include "bootinfo.h"
-#include "dtb/dtb.h"
+#include "device/dtb.h"
 #include "memory/physical.h"
+#include "device/opensbi.h"
 
 // Simple UART output for debugging (assuming standard QEMU UART at 0x10000000)
 #define UART_BASE 0x10000000
@@ -78,7 +79,8 @@ void kmain(boot_info_t* info)
         }
     }
     
-    // Halt
+    sbi_shutdown();
+
     while (1) 
     {
         asm volatile("wfi");
@@ -90,7 +92,7 @@ void boot_cmain(const void* dtb_ptr)
     boot_info_t info;
     info.core_count = 0;
     info.memory_region_count = 0;
-    
+
     dtb_parse(dtb_ptr, &info);
     
     kmain(&info);

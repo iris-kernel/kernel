@@ -63,6 +63,34 @@ static int my_strncmp(const char* a, const char* b, int n)
     return 0;
 }
 
+static void my_strncpy(char* dest, const char* src, int n) 
+{
+    int i;
+    for (i = 0; i < n - 1 && src[i] != '\0'; i++) 
+    {
+        dest[i] = src[i];
+    }
+    dest[i] = '\0';
+}
+
+// Check if a string contains a substring
+static int my_strstr(const char* haystack, const char* needle) 
+{
+    int needle_len = my_strlen(needle);
+    int haystack_len = my_strlen(haystack);
+    
+    if (needle_len > haystack_len) return 0;
+    
+    for (int i = 0; i <= haystack_len - needle_len; i++) 
+    {
+        if (my_strncmp(&haystack[i], needle, needle_len) == 0) 
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static uint32_t fdt32_to_cpu(uint32_t x) 
 {
     return ((x & 0xFF000000) >> 24) |
@@ -222,6 +250,7 @@ void dtb_parse(const void* dtb_ptr, boot_info_t* out)
     out->core_count = 0;
     out->memory_region_count = 0;
     out->reserved_region_count = 0;
+    out->syscon_device_count = 0;
 
     out->dtb_base = (uintptr_t)dtb_ptr;
     out->dtb_size = fdt32_to_cpu(hdr->totalsize);
@@ -236,8 +265,12 @@ void dtb_parse(const void* dtb_ptr, boot_info_t* out)
     int in_cpus = 0;
     int in_memory = 0;
     int in_cpu_node = 0;
+    int checking_syscon = 0;
+    
+    // Store current node name for syscon parsing
+    char current_node_name[32] = {0};
 
-    // Parse the device tree structure for memory regions and CPUs
+    // Parse the device tree structure for memory regions, CPUs, and syscon devices
     while (1) 
     {
         uint32_t token = fdt32_to_cpu(*(uint32_t*)ptr);
@@ -266,6 +299,13 @@ void dtb_parse(const void* dtb_ptr, boot_info_t* out)
                 {
                     in_memory = 1;
                 }
+                
+                // Store node name for potential syscon device and mark for checking
+                if (depth >= 1 && out->syscon_device_count < SYSCON_MAX) 
+                {
+                    my_strncpy(current_node_name, name, sizeof(current_node_name));
+                    checking_syscon = 1;
+                }
 
                 ptr += len + 1;
                 ptr = (const char*)(((uintptr_t)ptr + 3) & ~3); // Align to 4
@@ -283,6 +323,8 @@ void dtb_parse(const void* dtb_ptr, boot_info_t* out)
                 {
                     in_cpu_node = 0;
                 }
+                checking_syscon = 0;
+                current_node_name[0] = '\0';
                 break;
             case FDT_PROP: 
             {
@@ -325,6 +367,65 @@ void dtb_parse(const void* dtb_ptr, boot_info_t* out)
                     {
                         uart_puts("    Unexpected reg property length\n");
                     }
+                }
+
+                // Check for syscon devices by looking at compatible property
+                if (checking_syscon && my_strcmp(prop_name, "compatible") == 0) 
+                {
+                    const char* compat_str = (const char*)value;
+                    
+                    // Check if this is a syscon device
+                    // Compatible strings are null-terminated and may contain multiple entries
+                    int offset = 0;
+                    while (offset < (int)prop_len) 
+                    {
+                        const char* current_compat = compat_str + offset;
+                        
+                        if (my_strstr(current_compat, "syscon") || 
+                            my_strcmp(current_compat, "simple-mfd") == 0 ||
+                            my_strstr(current_compat, "sifive,test") || 
+                            my_strstr(current_compat, "shutdown"))
+                        {
+                            // This is a syscon device, now we need to find its reg property
+                            // We'll mark it and handle it when we encounter the reg property
+                            checking_syscon = 2; // Mark as confirmed syscon
+                            break;
+                        }
+                        
+                        offset += my_strlen(current_compat) + 1;
+                    }
+                }
+                
+                // Parse syscon device registers
+                if (checking_syscon == 2 && my_strcmp(prop_name, "reg") == 0 && 
+                    out->syscon_device_count < SYSCON_MAX) 
+                {
+                    // Parse the first reg entry for the syscon device
+                    if (prop_len >= 16 && (prop_len % 16) == 0) 
+                    {
+                        const uint64_t* data = (const uint64_t*)value;
+                        out->syscon_devices[out->syscon_device_count].base = fdt64_to_cpu(data[0]);
+                        out->syscon_devices[out->syscon_device_count].size = fdt64_to_cpu(data[1]);
+                        my_strncpy(out->syscon_devices[out->syscon_device_count].name, 
+                                  current_node_name, sizeof(out->syscon_devices[out->syscon_device_count].name));
+                        out->syscon_device_count++;
+                    } 
+                    else if (prop_len >= 8 && (prop_len % 8) == 0) 
+                    {
+                        const uint32_t* data32 = (const uint32_t*)value;
+                        out->syscon_devices[out->syscon_device_count].base = fdt32_to_cpu(data32[0]);
+                        out->syscon_devices[out->syscon_device_count].size = fdt32_to_cpu(data32[1]);
+                        my_strncpy(out->syscon_devices[out->syscon_device_count].name, 
+                                  current_node_name, sizeof(out->syscon_devices[out->syscon_device_count].name));
+                        out->syscon_device_count++;
+                    }
+                    
+                    uart_puts("Found syscon device: ");
+                    uart_puts(out->syscon_devices[out->syscon_device_count - 1].name);
+                    uart_puts(" @ ");
+                    uart_putx(out->syscon_devices[out->syscon_device_count - 1].base);
+                    uart_puts("\n");
+                    checking_syscon = 0; // Reset after processing
                 }
 
                 ptr += (prop_len + 3) & ~3; // Align to 4-byte boundary
