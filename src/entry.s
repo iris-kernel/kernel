@@ -2,18 +2,15 @@
 
 .option norvc
 
-.type start, @function
-.global start
-start:
+.type _start, @function
+.global _start
+_start:
 	.cfi_startproc
 
 .option push
 .option norelax
 	la gp, global_pointer
 .option pop
-
-	/* Reset satp */
-	csrw satp, zero
 
 	/* Setup stack */
 	la sp, stack_top
@@ -26,12 +23,11 @@ bss_clear:
 	addi t5, t5, 8
 	bltu t5, t6, bss_clear
 
+	/* OpenSBI passes DTB pointer in a1, hartid in a0 */
 	/* Move DTB pointer from a1 to a0 for boot_cmain */
 	mv a0, a1
 
 	/* Jump to C */
-	la t0, boot_cmain
-	csrw mepc, t0
 	tail boot_cmain
 
 	.cfi_endproc
