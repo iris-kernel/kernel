@@ -27,23 +27,29 @@ typedef struct
 fdt_header_t;
 
 // Simple string functions since we're in freestanding environment
-static int my_strlen(const char* str) {
+static int my_strlen(const char* str) 
+{
     int len = 0;
     while (str[len]) len++;
     return len;
 }
 
-static int my_strcmp(const char* a, const char* b) {
-    while (*a && (*a == *b)) {
+static int my_strcmp(const char* a, const char* b) 
+{
+    while (*a && (*a == *b)) 
+    {
         a++;
         b++;
     }
     return *(unsigned char*)a - *(unsigned char*)b;
 }
 
-static int my_strncmp(const char* a, const char* b, int n) {
-    for (int i = 0; i < n; i++) {
-        if (a[i] != b[i] || a[i] == '\0') {
+static int my_strncmp(const char* a, const char* b, int n) 
+{
+    for (int i = 0; i < n; i++) 
+    {
+        if (a[i] != b[i] || a[i] == '\0') 
+        {
             return a[i] - b[i];
         }
     }
@@ -94,6 +100,9 @@ void dtb_parse(const void* dtb_ptr, boot_info_t* out)
     out->core_count = 0;
     out->memory_region_count = 0;
 
+    out->dtb_base = dtb_ptr;
+    out->dtb_size = fdt32_to_cpu(hdr->totalsize);
+
     while (1) 
     {
         uint32_t token = fdt32_to_cpu(*(uint32_t*)ptr);
@@ -105,51 +114,38 @@ void dtb_parse(const void* dtb_ptr, boot_info_t* out)
             {
                 const char* name = ptr;
                 int len = my_strlen(name);
-                
-                // Debug: print node names at depth 0 and 1
-                if (depth <= 1) {
-                    uart_puts("Node at depth ");
-                    uart_putx(depth);
-                    uart_puts(": ");
-                    uart_puts(name);
-                    uart_puts("\n");
-                }
-                
-                // Check for cpus node at root level
-                if (my_strcmp(name, "cpus") == 0 && depth == 0) {
+            
+                // Check nodes at the correct depth BEFORE incrementing
+                // Root node is at depth 0, its children (cpus, memory) are at depth 1
+                if (my_strcmp(name, "cpus") == 0 && depth == 1) 
+                {
                     in_cpus = 1;
-                    uart_puts("Found cpus node!\n");
                 }
-                // Check for individual CPU nodes (usually "cpu@0", "cpu@1", etc.)
-                else if (in_cpus && depth == 1 && my_strncmp(name, "cpu@", 4) == 0) {
+                else if (in_cpus && depth == 2 && my_strncmp(name, "cpu@", 4) == 0) 
+                {
                     in_cpu_node = 1;
-                    // Simple counting approach - just count cpu@ nodes
                     out->core_count++;
-                    uart_puts("Found CPU node: ");
-                    uart_puts(name);
-                    uart_puts("\n");
                 }
                 
-                // Check for memory nodes (can be "memory" or "memory@address") at root level
-                if ((my_strcmp(name, "memory") == 0 || my_strncmp(name, "memory@", 7) == 0) && depth == 0) {
+                if ((my_strcmp(name, "memory") == 0 || my_strncmp(name, "memory@", 7) == 0) && depth == 1) 
+                {
                     in_memory = 1;
-                    uart_puts("Found memory node: ");
-                    uart_puts(name);
-                    uart_puts("\n");
                 }
 
                 ptr += len + 1;
                 ptr = (const char*)(((uintptr_t)ptr + 3) & ~3); // Align to 4
-                depth++;
+                depth++; // Increment depth AFTER processing the node
                 break;
             }
             case FDT_END_NODE:
                 depth--;
-                if (depth == 0) {
+                if (depth == 1) 
+                {
                     in_cpus = 0;
                     in_memory = 0;
                 }
-                if (depth == 1 && in_cpus) {
+                if (depth == 2 && in_cpus) 
+                {
                     in_cpu_node = 0;
                 }
                 break;
@@ -161,24 +157,42 @@ void dtb_parse(const void* dtb_ptr, boot_info_t* out)
                 const void* value = ptr;
 
                 // Parse memory regions
-                if (in_memory && my_strcmp(prop_name, "reg") == 0) {
-                    // Try different formats based on property length
-                    if (prop_len >= 16) {
-                        // 64-bit addresses and sizes
+                if (in_memory && my_strcmp(prop_name, "reg") == 0 && 
+                    out->memory_region_count < MEM_REGIONS_MAX) 
+                {
+                    // Memory reg properties are typically arrays of (address, size) pairs
+                    // Each pair can be 32-bit or 64-bit values
+                    // Try 64-bit first (16 bytes per entry)
+                    if (prop_len >= 16 && (prop_len % 16) == 0) 
+                    {
                         const uint64_t* data = (const uint64_t*)value;
-                        out->memory_regions[out->memory_region_count].base = fdt64_to_cpu(data[0]);
-                        out->memory_regions[out->memory_region_count].size = fdt64_to_cpu(data[1]);
-                        out->memory_region_count++;
-                    } else if (prop_len >= 8) {
-                        // 32-bit addresses and sizes
+                        int entries = prop_len / 16;
+                        for (int i = 0; i < entries && out->memory_region_count < MEM_REGIONS_MAX; i++) 
+                        {
+                            out->memory_regions[out->memory_region_count].base = fdt64_to_cpu(data[i*2]);
+                            out->memory_regions[out->memory_region_count].size = fdt64_to_cpu(data[i*2+1]);
+                            out->memory_region_count++;
+                        }
+                    } 
+                    // Try 32-bit (8 bytes per entry)
+                    else if (prop_len >= 8 && (prop_len % 8) == 0) 
+                    {
                         const uint32_t* data32 = (const uint32_t*)value;
-                        out->memory_regions[out->memory_region_count].base = fdt32_to_cpu(data32[0]);
-                        out->memory_regions[out->memory_region_count].size = fdt32_to_cpu(data32[1]);
-                        out->memory_region_count++;
+                        int entries = prop_len / 8;
+                        for (int i = 0; i < entries && out->memory_region_count < MEM_REGIONS_MAX; i++) 
+                        {
+                            out->memory_regions[out->memory_region_count].base = fdt32_to_cpu(data32[i*2]);
+                            out->memory_regions[out->memory_region_count].size = fdt32_to_cpu(data32[i*2+1]);
+                            out->memory_region_count++;
+                        }
+                    }
+                    else 
+                    {
+                        uart_puts("    Unexpected reg property length\n");
                     }
                 }
 
-                ptr += (prop_len + 3) & ~3; // Align
+                ptr += (prop_len + 3) & ~3; // Align to 4-byte boundary
                 break;
             }
             case FDT_NOP:
@@ -186,6 +200,9 @@ void dtb_parse(const void* dtb_ptr, boot_info_t* out)
             case FDT_END:
                 return;
             default:
+                uart_puts("Unknown DTB token: ");
+                uart_putx(token);
+                uart_puts("\n");
                 return; // Unknown token
         }
     }
