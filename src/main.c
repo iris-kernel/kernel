@@ -88,25 +88,8 @@ void kmain(boot_info_t* info)
 void boot_cmain(const void* dtb_ptr) 
 {
     boot_info_t info;
-    
-    // Initialize the boot info structure
     info.core_count = 0;
     info.memory_region_count = 0;
-
-    // Check DTB magic number first
-    /*
-    if (dtb_ptr) 
-    {
-        uint32_t magic_raw = *(uint32_t*)dtb_ptr;
-        uint32_t magic = ((magic_raw & 0xFF000000) >> 24) |
-                        ((magic_raw & 0x00FF0000) >> 8)  |
-                        ((magic_raw & 0x0000FF00) << 8)  |
-                        ((magic_raw & 0x000000FF) << 24);
-        uart_puts("DTB magic: ");
-        uart_putx(magic);
-        uart_puts(" (should be 0xd00dfeed)\n");
-    }
-    */
     
     dtb_parse(dtb_ptr, &info);
     
