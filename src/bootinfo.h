@@ -9,21 +9,17 @@
 
 typedef struct 
 {
+    uintptr_t base;
+    size_t size;
+}
+mem_region_t;
+
+typedef struct 
+{
     int core_count;
 
-    struct 
-    {
-        uintptr_t base;
-        size_t size;
-    }
-    memory_regions[MEM_REGIONS_MAX];
-
-    struct 
-    {
-        uintptr_t base;
-        size_t size;
-    }
-    reserved_regions[MEM_RESERVED_MAX];
+    mem_region_t memory_regions[MEM_REGIONS_MAX];
+    mem_region_t reserved_regions[MEM_RESERVED_MAX];
 
     int memory_region_count;
     int reserved_region_count;

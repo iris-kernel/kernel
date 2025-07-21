@@ -26,6 +26,13 @@ typedef struct
 }
 fdt_header_t;
 
+typedef struct 
+{
+    uint64_t address;
+    uint64_t size;
+}
+fdt_reserve_entry_t;
+
 // Simple string functions since we're in freestanding environment
 static int my_strlen(const char* str) 
 {
@@ -82,6 +89,127 @@ static const char* fdt_get_string(const void* dtb, uint32_t offset)
     return (const char*)dtb + fdt32_to_cpu(hdr->off_dt_strings) + offset;
 }
 
+static void parse_reserved_memory_map(const void* dtb_ptr, boot_info_t* out)
+{
+    const fdt_header_t* hdr = (const fdt_header_t*)dtb_ptr;
+    const fdt_reserve_entry_t* rsvmap = (const fdt_reserve_entry_t*)
+        ((const char*)dtb_ptr + fdt32_to_cpu(hdr->off_mem_rsvmap));
+
+    out->reserved_region_count = 0;
+    
+    // Parse the reserved memory map entries
+    for (int i = 0; i < MEM_RESERVED_MAX; i++) 
+    {
+        uint64_t address = fdt64_to_cpu(rsvmap[i].address);
+        uint64_t size = fdt64_to_cpu(rsvmap[i].size);
+        
+        // End of reserved memory map is marked by entry with address=0 and size=0
+        if (address == 0 && size == 0) 
+            break;
+            
+        out->reserved_regions[out->reserved_region_count].base = address;
+        out->reserved_regions[out->reserved_region_count].size = size;
+        out->reserved_region_count++;
+    }
+}
+
+static void parse_reserved_memory_nodes(const void* dtb_ptr, boot_info_t* out,
+                                        const char* struct_block)
+{
+    const char* ptr = struct_block;
+    int depth = 0;
+    int in_reserved_memory = 0;
+    int in_reserved_child = 0;
+    
+    while (1) 
+    {
+        uint32_t token = fdt32_to_cpu(*(uint32_t*)ptr);
+        ptr += 4;
+
+        switch (token) 
+        {
+            case FDT_BEGIN_NODE: 
+            {
+                const char* name = ptr;
+                int len = my_strlen(name);
+                
+                // Look for reserved-memory node at depth 1
+                if (my_strcmp(name, "reserved-memory") == 0 && depth == 1) 
+                {
+                    in_reserved_memory = 1;
+                }
+                // Look for child nodes of reserved-memory at depth 2
+                else if (in_reserved_memory && depth == 2) 
+                {
+                    in_reserved_child = 1;
+                }
+
+                ptr += len + 1;
+                ptr = (const char*)(((uintptr_t)ptr + 3) & ~3); // Align to 4
+                depth++;
+                break;
+            }
+            case FDT_END_NODE:
+                depth--;
+                if (depth == 1) 
+                {
+                    in_reserved_memory = 0;
+                }
+                if (depth == 2 && in_reserved_memory) 
+                {
+                    in_reserved_child = 0;
+                }
+                break;
+            case FDT_PROP: 
+            {
+                uint32_t prop_len = fdt32_to_cpu(*(uint32_t*)ptr); ptr += 4;
+                uint32_t nameoff = fdt32_to_cpu(*(uint32_t*)ptr); ptr += 4;
+                const char* prop_name = fdt_get_string(dtb_ptr, nameoff);
+                const void* value = ptr;
+
+                // Parse reg properties in reserved-memory child nodes
+                if (in_reserved_child && my_strcmp(prop_name, "reg") == 0 && 
+                    out->reserved_region_count < MEM_RESERVED_MAX) 
+                {
+                    // Similar to memory parsing - try 64-bit first
+                    if (prop_len >= 16 && (prop_len % 16) == 0) 
+                    {
+                        const uint64_t* data = (const uint64_t*)value;
+                        int entries = prop_len / 16;
+                        for (int i = 0; i < entries && out->reserved_region_count < MEM_RESERVED_MAX; i++) 
+                        {
+                            out->reserved_regions[out->reserved_region_count].base = fdt64_to_cpu(data[i*2]);
+                            out->reserved_regions[out->reserved_region_count].size = fdt64_to_cpu(data[i*2+1]);
+                            out->reserved_region_count++;
+                        }
+                    } 
+                    // Try 32-bit
+                    else if (prop_len >= 8 && (prop_len % 8) == 0) 
+                    {
+                        const uint32_t* data32 = (const uint32_t*)value;
+                        int entries = prop_len / 8;
+                        for (int i = 0; i < entries && out->reserved_region_count < MEM_RESERVED_MAX; i++) 
+                        {
+                            out->reserved_regions[out->reserved_region_count].base = fdt32_to_cpu(data32[i*2]);
+                            out->reserved_regions[out->reserved_region_count].size = fdt32_to_cpu(data32[i*2+1]);
+                            out->reserved_region_count++;
+                        }
+                    }
+                }
+
+                ptr += (prop_len + 3) & ~3; // Align to 4-byte boundary
+                break;
+            }
+            case FDT_NOP:
+                break;
+            case FDT_END:
+                return;
+            default:
+                return; // Unknown token
+        }
+    }
+}
+
 void dtb_parse(const void* dtb_ptr, boot_info_t* out)
 {
     if (!dtb_ptr || !out) return;
@@ -90,6 +218,17 @@ void dtb_parse(const void* dtb_ptr, boot_info_t* out)
 
     if (fdt32_to_cpu(hdr->magic) != FDT_MAGIC) return;
 
+    // Initialize counters
+    out->core_count = 0;
+    out->memory_region_count = 0;
+    out->reserved_region_count = 0;
+
+    out->dtb_base = (uintptr_t)dtb_ptr;
+    out->dtb_size = fdt32_to_cpu(hdr->totalsize);
+
+    // First, parse the reserved memory map from the header
+    parse_reserved_memory_map(dtb_ptr, out);
+
     const char* struct_block = (const char*)dtb_ptr + fdt32_to_cpu(hdr->off_dt_struct);
     const char* ptr = struct_block;
 
@@ -97,12 +236,8 @@ void dtb_parse(const void* dtb_ptr, boot_info_t* out)
     int in_cpus = 0;
     int in_memory = 0;
     int in_cpu_node = 0;
-    out->core_count = 0;
-    out->memory_region_count = 0;
 
-    out->dtb_base = dtb_ptr;
-    out->dtb_size = fdt32_to_cpu(hdr->totalsize);
-
+    // Parse the device tree structure for memory regions and CPUs
     while (1) 
     {
         uint32_t token = fdt32_to_cpu(*(uint32_t*)ptr);
@@ -198,6 +333,8 @@ void dtb_parse(const void* dtb_ptr, boot_info_t* out)
             case FDT_NOP:
                 break;
             case FDT_END:
+                // After parsing the main structure, parse reserved-memory nodes
+                parse_reserved_memory_nodes(dtb_ptr, out, struct_block);
                 return;
             default:
                 uart_puts("Unknown DTB token: ");
