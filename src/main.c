@@ -72,6 +72,8 @@ void kmain(boot_info_t* info)
     {
         uart_puts("ERROR: Failed to Initialize PMM!\n");
 
+        sbi_shutdown();
+
         // Halt
         while (1) 
         {

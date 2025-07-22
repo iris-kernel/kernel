@@ -1,8 +1,5 @@
 #include "physical.h"
 
-#include <stddef.h>
-#include <stdint.h>
-
 static void get_overlap(mem_region_t* out, mem_region_t* a, mem_region_t* b);
 static mem_region_t find_largest_gap(mem_region_t* available, int avail_count, mem_region_t* reserved, int reserved_count);
 
@@ -18,7 +15,24 @@ bool phys_init(boot_info_t* info)
         info->reserved_region_count
     );
 
-    pmm_state.metadata.base = best_region.base;
+    /* Set page table region */
+    uint64_t original_base = best_region.base;
+    uint64_t original_size = best_region.size;
+    pmm_state.metadata.base = ALIGN_UP(original_base, 64);
+    pmm_state.metadata.size = original_size / (PAGE_SIZE * 2); // 4 bits for each min sized page
+
+    /* Set usable region */
+    uint64_t metadata_end = pmm_state.metadata.base + pmm_state.metadata.size;
+    pmm_state.usable.base = ALIGN_UP(metadata_end, PAGE_SIZE);
+    pmm_state.usable.size = (original_base + original_size) - best_region.base;
+    pmm_state.page_count = pmm_state.usable.size / PAGE_SIZE;
+
+    /* Null table */
+    for(size_t i = 0; i < pmm_state.metadata.size; i += 8)
+    {
+        uint64_t* pp = pmm_state.metadata.base + i;
+        *pp = 0x0000000000000000;
+    }
 
     uart_puts("Available Memory: ");
     uart_puti(best_region.size / (1024 * 1024));
@@ -27,19 +41,48 @@ bool phys_init(boot_info_t* info)
     return true;
 }
 
-void phys_reserve(void* ptr)
+void phys_reserve(void* ptr, size_t size)
 {
 
 }
 
-void* phys_alloc()
+static uint8_t get_page(uintmax_t index)
 {
+    int m = index % 2;
+    uint8_t* base = pmm_state.metadata.base + index / 2;
+    uint8_t meta = 0b1100;
+
+    if(m == 1)
+        meta = (*base) & 0x0F;
+    else
+        meta = ((*base) & 0xF0) >> 4;
+
+    return meta;  
+}
+
+void* phys_alloc(size_t size)
+{
+    bool found = false;
+    uintmax_t pages = 0;
+
+    while(!found)
+    {
+        while(1)
+        {
+            uint8_t* meta =  
+        }
+    }
+
     return 0;
 }
 
 void phys_free(void* ptr)
 {
+    if(ptr < pmm_state.usable.base)
+        return;
 
+    if(ptr > pmm_state.page_count * 4096)
+        return;
 }
 
 static void get_overlap(mem_region_t* out, mem_region_t* a, mem_region_t* b)
